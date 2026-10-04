@@ -44,6 +44,7 @@ export default function SchedulePage(): JSX.Element {
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const currentVersion = usePersistentStore(routeStore, (state) => state.current)
   const [scope, setScope] = useState<'all' | 'conflict'>('all')
 
   /** 由投放点的群号安排 + 蜂群当前所在地块，汇总出「某群在某地块」的时间占用 */
@@ -184,7 +185,17 @@ export default function SchedulePage(): JSX.Element {
           </Card>
         </Col>
         <Col xs={24} xl={10}>
-          <Card size="small" title="地图总览（地块 / 投放点 / 转场折线）">
+          <Card
+            size="small"
+            title={
+              <Space wrap size={6}>
+                <span>地图总览（地块 / 投放点 / 转场折线）</span>
+                <Tag color={currentVersion ? 'green' : 'default'}>
+                  {currentVersion ? `生效路线 v${currentVersion.version}` : '路线未发布'}
+                </Tag>
+              </Space>
+            }
+          >
             <RouteMap orchards={orchards} dropPoints={dropPoints} routes={routes} height={360} title="季内投放分布" />
           </Card>
         </Col>

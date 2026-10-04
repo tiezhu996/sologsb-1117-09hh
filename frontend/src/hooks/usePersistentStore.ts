@@ -1,22 +1,24 @@
 import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
-import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import type { BeeColony, DropPoint, Orchard, RouteVersion, TransitRoute } from '@/types'
+import { basisHash, buildLegs, freezeStops, sumDistanceKm } from '@/utils/routePlan'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 四张表 + 元数据表 */
-class BeeRouteDb extends Dexie {
+/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 / 路线版本 五张表 + 元数据表 */
+export class BeeRouteDb extends Dexie {
   orchards!: Table<Orchard, string>
   colonies!: Table<BeeColony, string>
   dropPoints!: Table<DropPoint, string>
   routes!: Table<TransitRoute, string>
+  routeVersions!: Table<RouteVersion, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -29,7 +31,7 @@ class BeeRouteDb extends Dexie {
       meta: 'key'
     })
     // v2：投放点新增「可容纳箱数」字段，迁移时为历史投放点补齐（按 8 箱兜底）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         orchards: 'id, name, crop, bloomStart',
         colonies: 'id, code, status, currentOrchardId',
@@ -46,6 +48,114 @@ class BeeRouteDb extends Dexie {
               point.capacityBoxes = 8
             }
           })
+      })
+    // v3：转场路线版本化——路线段挂版本头，发布时冻结顺序 / 坐标 / 首段时刻 / 预计里程
+    this.version(SCHEMA_VERSION)
+      .stores({
+        orchards: 'id, name, crop, bloomStart',
+        colonies: 'id, code, status, currentOrchardId',
+        dropPoints: 'id, orchardId, code, dropWindow',
+        routes: 'id, versionId, chainId, version, versionStatus, departAt',
+        routeVersions: 'id, chainId, version, status, departAt',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        const points = await tx.table<DropPoint, string>('dropPoints').toArray()
+        const legacy = (await tx.table('routes').toArray()) as Array<Record<string, unknown>>
+        if (legacy.length === 0) return
+
+        // 旧路线段补首版：按出发时刻 + 车型 + 风险备注归链，段顺序沿用旧顺序（按时刻兜底）
+        type Group = { key: string; rows: Array<Record<string, unknown>> }
+        const groups = new Map<string, Group>()
+        ;[...legacy]
+          .sort((a, b) => String(a.departAt ?? '').localeCompare(String(b.departAt ?? '')))
+          .forEach((row) => {
+            const key = `${String(row.departAt ?? '')}|${String(row.vehicleType ?? '')}|${String(row.riskNote ?? '')}`
+            const group = groups.get(key) ?? { key, rows: [] }
+            group.rows.push(row)
+            groups.set(key, group)
+          })
+
+        const now = new Date().toISOString()
+        let chainIndex = 0
+        for (const group of groups.values()) {
+          chainIndex += 1
+          const chainId = `chain_v3_${chainIndex}`
+          const versionId = `rv_${chainId}_1`
+          const stopIds: string[] = []
+          group.rows.forEach((row, seq) => {
+            const fromId = String(row.fromDropId ?? '')
+            const toId = String(row.toDropId ?? '')
+            if (seq === 0) stopIds.push(fromId)
+            stopIds.push(toId)
+          })
+          const first = group.rows[0]
+          const departAt = String(first.departAt ?? '')
+          const vehicleType = (first.vehicleType as TransitRoute['vehicleType']) ?? '厢式货车'
+          const riskNote = String(first.riskNote ?? '')
+          const frozen = freezeStops(stopIds, points)
+          const frozenMap = new Map(frozen.map((item) => [item.dropId, item]))
+          const coord = (id: string): { longitude: number; latitude: number } => {
+            const live = points.find((item) => item.id === id)
+            const snap = frozenMap.get(id)
+            return { longitude: live?.longitude ?? snap?.longitude ?? 0, latitude: live?.latitude ?? snap?.latitude ?? 0 }
+          }
+
+          // 重写旧段：补齐版本归属、段顺序、冻结坐标、执行状态
+          const upgraded: TransitRoute[] = group.rows.map((row, seq) => {
+            const fromId = String(row.fromDropId ?? '')
+            const toId = String(row.toDropId ?? '')
+            const from = coord(fromId)
+            const to = coord(toId)
+            return {
+              id: String(row.id ?? `rt_legacy_${chainIndex}_${seq}`),
+              versionId,
+              chainId,
+              version: 1,
+              seq,
+              fromDropId: fromId,
+              toDropId: toId,
+              fromLongitude: from.longitude,
+              fromLatitude: from.latitude,
+              toLongitude: to.longitude,
+              toLatitude: to.latitude,
+              distanceKm: Number(row.distanceKm ?? 0) || 0,
+              durationH: Number(row.durationH ?? 0) || 0,
+              vehicleType,
+              departAt,
+              riskNote,
+              legStatus: 'pending',
+              actualNote: String(row.actualNote ?? '待执行') || '待执行',
+              versionStatus: 'published'
+            }
+          })
+
+          // 旧数据若已回填实际执行记录，首版沿用其执行状态（已执行段保留实际记录）
+          upgraded.forEach((leg) => {
+            if (leg.actualNote && leg.actualNote !== '待执行') leg.legStatus = 'done'
+          })
+
+          const versionHead: RouteVersion = {
+            id: versionId,
+            chainId,
+            version: 1,
+            status: 'published',
+            vehicleType,
+            departAt,
+            stopIds,
+            stops: frozen,
+            totalDistanceKm: sumDistanceKm(upgraded),
+            riskNote,
+            basisHash: basisHash(stopIds, points),
+            invalidReason: '',
+            createdAt: now,
+            publishedAt: now,
+            invalidatedAt: ''
+          }
+          await tx.table<TransitRoute, string>('routes').bulkPut(upgraded)
+          await tx.table<RouteVersion, string>('routeVersions').put(versionHead)
+        }
+        void buildLegs
       })
   }
 }
@@ -221,17 +331,41 @@ export async function seedDemoData(): Promise<void> {
     }
   ])
 
-  await db.routes.bulkPut([
-    {
-      id: 'rt_001',
-      fromDropId: 'dp_b01',
-      toDropId: 'dp_c01',
-      distanceKm: 9.4,
-      durationH: 0.54,
-      vehicleType: '农用三轮',
-      departAt: `${year}-04-13T06:30`,
-      riskNote: '西沟坡道窄，雨天泥泞，需小车倒运',
-      actualNote: '待执行'
-    }
-  ])
+  // 示例路线以「已发布 v1」写入：版本头冻结顺序 / 坐标 / 首段时刻 / 里程
+  const departAt = `${year}-04-13T06:30`
+  const stopIds = ['dp_b01', 'dp_c01']
+  const points = await db.dropPoints.toArray()
+  const versionId = 'rv_chain_demo_1'
+  const chainId = 'chain_demo'
+  const head: RouteVersion = {
+    id: versionId,
+    chainId,
+    version: 1,
+    status: 'published',
+    vehicleType: '农用三轮',
+    departAt,
+    stopIds,
+    stops: freezeStops(stopIds, points),
+    totalDistanceKm: 0,
+    riskNote: '西沟坡道窄，雨天泥泞，需小车倒运',
+    basisHash: basisHash(stopIds, points),
+    invalidReason: '',
+    createdAt: new Date().toISOString(),
+    publishedAt: new Date().toISOString(),
+    invalidatedAt: ''
+  }
+  const legs = buildLegs({
+    versionId,
+    chainId,
+    version: 1,
+    versionStatus: 'published',
+    stopIds,
+    vehicleType: '农用三轮',
+    departAt,
+    riskNote: head.riskNote,
+    livePoints: points
+  })
+  head.totalDistanceKm = sumDistanceKm(legs)
+  await db.routes.bulkPut(legs)
+  await db.routeVersions.put(head)
 }

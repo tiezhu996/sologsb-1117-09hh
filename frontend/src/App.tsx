@@ -22,6 +22,7 @@ export default function AppLayout(): JSX.Element {
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const currentVersion = usePersistentStore(routeStore, (state) => state.current)
 
   const totalKm = Math.round(routes.reduce((sum, item) => sum + item.distanceKm, 0) * 100) / 100
 
@@ -47,7 +48,12 @@ export default function AppLayout(): JSX.Element {
         <div style={{ padding: 16 }}>
           <Statistic title={<span style={{ color: '#a9b3ad', fontSize: 12 }}>已入册地块</span>} value={orchards.length} valueStyle={{ color: '#f2c14e' }} />
           <Statistic title={<span style={{ color: '#a9b3ad', fontSize: 12 }}>蜂群 / 投放点</span>} value={`${colonies.length} / ${dropPoints.length}`} valueStyle={{ color: '#f2c14e', fontSize: 18 }} />
-          <Statistic title={<span style={{ color: '#a9b3ad', fontSize: 12 }}>转场里程合计</span>} value={`${totalKm} km`} valueStyle={{ color: '#f2c14e', fontSize: 18 }} />
+          <Statistic
+            title={<span style={{ color: '#a9b3ad', fontSize: 12 }}>生效路线里程合计</span>}
+            value={`${totalKm} km`}
+            suffix={currentVersion ? <span style={{ fontSize: 13, color: '#95de64' }}>v{currentVersion.version}</span> : <span style={{ fontSize: 13, color: '#a9b3ad' }}>未发布</span>}
+            valueStyle={{ color: '#f2c14e', fontSize: 18 }}
+          />
           <Typography.Paragraph style={{ color: '#7f8d82', fontSize: 11, marginTop: 12, marginBottom: 0 }}>
             数据保存在浏览器 IndexedDB，无需后端服务
           </Typography.Paragraph>

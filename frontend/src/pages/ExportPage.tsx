@@ -31,6 +31,8 @@ export default function ExportPage(): JSX.Element {
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
   const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const routeVersions = usePersistentStore(routeStore, (state) => state.versions)
+  const currentVersion = usePersistentStore(routeStore, (state) => state.current)
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape')
 
   const orchardName = (id: string): string => orchards.find((item) => item.id === id)?.name ?? '未知地块'
@@ -85,12 +87,15 @@ export default function ExportPage(): JSX.Element {
         const from = dropPoints.find((item) => item.id === route.fromDropId)
         const to = dropPoints.find((item) => item.id === route.toDropId)
         return {
-          from: from ? `${from.code}（${orchardName(from.orchardId)}）` : '—',
-          to: to ? `${to.code}（${orchardName(to.orchardId)}）` : '—',
+          version: `v${route.version}`,
+          seq: route.seq + 1,
+          from: from ? `${from.code}（${orchardName(from.orchardId)}）` : `${route.fromDropId}（冻结点）`,
+          to: to ? `${to.code}（${orchardName(to.orchardId)}）` : `${route.toDropId}（冻结点）`,
           distanceKm: route.distanceKm,
           durationH: route.durationH,
           vehicleType: route.vehicleType,
           departAt: route.departAt,
+          legStatus: route.legStatus === 'done' ? '已执行' : '未执行',
           riskNote: route.riskNote || '—',
           actualNote: route.actualNote || '—'
         }
@@ -118,16 +123,19 @@ export default function ExportPage(): JSX.Element {
 
   function exportRoutes(): void {
     downloadCsv('转场路线表.csv', routeRows as unknown as Record<string, unknown>[], [
+      { key: 'version', label: '版本' },
+      { key: 'seq', label: '段序' },
       { key: 'from', label: '出发投放点' },
       { key: 'to', label: '到达投放点' },
       { key: 'distanceKm', label: '里程(km)' },
       { key: 'durationH', label: '预计耗时(h)' },
       { key: 'vehicleType', label: '车辆' },
-      { key: 'departAt', label: '出发时刻' },
+      { key: 'departAt', label: '首段时刻' },
+      { key: 'legStatus', label: '执行状态' },
       { key: 'riskNote', label: '途中风险' },
       { key: 'actualNote', label: '实际记录' }
     ])
-    message.success('转场路线表已导出')
+    message.success('转场路线表已导出（当前生效版本，冻结数据）')
   }
 
   function exportBackup(): void {
@@ -136,9 +144,10 @@ export default function ExportPage(): JSX.Element {
       orchards,
       colonies,
       dropPoints,
+      routeVersions,
       routes
     })
-    message.success('全量数据已导出为 JSON 备份')
+    message.success('全量数据已导出为 JSON 备份（含路线版本与冻结段）')
   }
 
   return (
@@ -170,7 +179,10 @@ export default function ExportPage(): JSX.Element {
           <Tag>地块 {orchards.length}</Tag>
           <Tag>蜂群 {colonies.length}</Tag>
           <Tag>投放点 {dropPoints.length}</Tag>
-          <Tag>路线 {routes.length}</Tag>
+          <Tag color={currentVersion ? 'green' : 'default'}>
+            路线版本 {currentVersion ? `v${currentVersion.version}（生效冻结）` : '未发布'}
+          </Tag>
+          <Tag>路线段 {routes.length}</Tag>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             生成时间 {dayjs().format('YYYY-MM-DD HH:mm')}
           </Typography.Text>
@@ -200,19 +212,24 @@ export default function ExportPage(): JSX.Element {
           />
         </Card>
 
-        <Card size="small" title={`转场路线表（${routeRows.length} 段）`}>
+        <Card
+          size="small"
+          title={`转场路线表 · ${currentVersion ? `当前生效 v${currentVersion.version}（${currentVersion.departAt} 冻结）` : '尚无生效版本'}（${routeRows.length} 段）`}
+        >
           <Table
             dataSource={routeRows}
-            rowKey={(record, index) => `${record.from}-${record.to}-${index ?? 0}`}
+            rowKey={(record, index) => `${record.version}-${record.from}-${record.to}-${index ?? 0}`}
             size="small"
             pagination={false}
             columns={[
+              { title: '段序', dataIndex: 'seq', key: 'seq', width: 60 },
               { title: '出发投放点', dataIndex: 'from', key: 'from' },
               { title: '到达投放点', dataIndex: 'to', key: 'to' },
               { title: '里程(km)', dataIndex: 'distanceKm', key: 'km', width: 100 },
               { title: '耗时(h)', dataIndex: 'durationH', key: 'hour', width: 90 },
               { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 100 },
-              { title: '出发时刻', dataIndex: 'departAt', key: 'depart' },
+              { title: '首段时刻', dataIndex: 'departAt', key: 'depart' },
+              { title: '执行', dataIndex: 'legStatus', key: 'leg', width: 80 },
               { title: '途中风险', dataIndex: 'riskNote', key: 'risk' }
             ]}
           />

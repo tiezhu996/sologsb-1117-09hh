@@ -283,12 +283,13 @@ export default function RouteMap({
               })}
             </g>
           ) : null}
-          {/* 已保存路线的虚线参考 */}
+          {/* 已发布路线的冻结参考线（按段上冻结坐标绘制，投放点挪动后留档版本仍准确） */}
           {orderedDrops.length === 0 && routes.length > 0
             ? routes.map((route) => {
-                const from = dropPoints.find((item) => item.id === route.fromDropId)
-                const to = dropPoints.find((item) => item.id === route.toDropId)
-                if (!from || !to) return null
+                const fromLive = dropPoints.find((item) => item.id === route.fromDropId)
+                const toLive = dropPoints.find((item) => item.id === route.toDropId)
+                const from = fromLive ?? { id: route.fromDropId, longitude: route.fromLongitude, latitude: route.fromLatitude }
+                const to = toLive ?? { id: route.toDropId, longitude: route.toLongitude, latitude: route.toLatitude }
                 const a = projectToGrid(from, gridBounds)
                 const b = projectToGrid(to, gridBounds)
                 return (
