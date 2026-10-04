@@ -30,7 +30,9 @@ export default function ExportPage(): JSX.Element {
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
-  const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const routes = usePersistentStore(routeStore, (state) => state.activeLegs)
+  const activePlan = usePersistentStore(routeStore, (state) => state.activePlan)
+  const routePlans = usePersistentStore(routeStore, (state) => state.plans)
   const [orientation, setOrientation] = useState<'portrait' | 'landscape'>('landscape')
 
   const orchardName = (id: string): string => orchards.find((item) => item.id === id)?.name ?? '未知地块'
@@ -85,8 +87,12 @@ export default function ExportPage(): JSX.Element {
         const from = dropPoints.find((item) => item.id === route.fromDropId)
         const to = dropPoints.find((item) => item.id === route.toDropId)
         return {
-          from: from ? `${from.code}（${orchardName(from.orchardId)}）` : '—',
-          to: to ? `${to.code}（${orchardName(to.orchardId)}）` : '—',
+          version: activePlan ? `v${activePlan.version}` : '—',
+          seq: route.seq + 1,
+          from: from ? `${from.code}（${orchardName(from.orchardId)}）` : `已删除点(${route.fromDropId})`,
+          to: to ? `${to.code}（${orchardName(to.orchardId)}）` : `已删除点(${route.toDropId})`,
+          fromCoord: `${route.fromLng},${route.fromLat}`,
+          toCoord: `${route.toLng},${route.toLat}`,
           distanceKm: route.distanceKm,
           durationH: route.durationH,
           vehicleType: route.vehicleType,
@@ -96,7 +102,7 @@ export default function ExportPage(): JSX.Element {
         }
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [routes, dropPoints, orchards]
+    [routes, dropPoints, orchards, activePlan]
   )
 
   function exportSchedule(): void {
@@ -118,16 +124,20 @@ export default function ExportPage(): JSX.Element {
 
   function exportRoutes(): void {
     downloadCsv('转场路线表.csv', routeRows as unknown as Record<string, unknown>[], [
+      { key: 'version', label: '版本' },
+      { key: 'seq', label: '段次' },
       { key: 'from', label: '出发投放点' },
+      { key: 'fromCoord', label: '出发冻结坐标' },
       { key: 'to', label: '到达投放点' },
+      { key: 'toCoord', label: '到达冻结坐标' },
       { key: 'distanceKm', label: '里程(km)' },
       { key: 'durationH', label: '预计耗时(h)' },
       { key: 'vehicleType', label: '车辆' },
-      { key: 'departAt', label: '出发时刻' },
+      { key: 'departAt', label: '首段时刻' },
       { key: 'riskNote', label: '途中风险' },
       { key: 'actualNote', label: '实际记录' }
     ])
-    message.success('转场路线表已导出')
+    message.success('转场路线表已导出（读取当前生效版本）')
   }
 
   function exportBackup(): void {
@@ -136,9 +146,10 @@ export default function ExportPage(): JSX.Element {
       orchards,
       colonies,
       dropPoints,
-      routes
+      routes,
+      routePlans
     })
-    message.success('全量数据已导出为 JSON 备份')
+    message.success('全量数据已导出为 JSON 备份（含全部路线版本留档）')
   }
 
   return (
@@ -170,7 +181,8 @@ export default function ExportPage(): JSX.Element {
           <Tag>地块 {orchards.length}</Tag>
           <Tag>蜂群 {colonies.length}</Tag>
           <Tag>投放点 {dropPoints.length}</Tag>
-          <Tag>路线 {routes.length}</Tag>
+          <Tag color="green">路线生效版本 {activePlan ? `v${activePlan.version}` : '无'}（段 {routes.length}）</Tag>
+          <Tag>历史留档 {routePlans.filter((plan) => plan.status === 'superseded').length}</Tag>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             生成时间 {dayjs().format('YYYY-MM-DD HH:mm')}
           </Typography.Text>
@@ -200,20 +212,33 @@ export default function ExportPage(): JSX.Element {
           />
         </Card>
 
-        <Card size="small" title={`转场路线表（${routeRows.length} 段）`}>
+        <Card
+          size="small"
+          title={
+            activePlan
+              ? `转场路线表 · 当前生效 v${activePlan.version}（${routeRows.length} 段 · 合计 ${activePlan.totalDistanceKm} km · 首段时刻 ${activePlan.departAt}）`
+              : `转场路线表（${routeRows.length} 段）`
+          }
+        >
           <Table
             dataSource={routeRows}
-            rowKey={(record, index) => `${record.from}-${record.to}-${index ?? 0}`}
+            rowKey={(record, index) => `${record.version}-${record.seq}-${index ?? 0}`}
             size="small"
             pagination={false}
+            scroll={{ x: true }}
             columns={[
+              { title: '版本', dataIndex: 'version', key: 'version', width: 70 },
+              { title: '段次', dataIndex: 'seq', key: 'seq', width: 60 },
               { title: '出发投放点', dataIndex: 'from', key: 'from' },
+              { title: '出发坐标', dataIndex: 'fromCoord', key: 'fromCoord', width: 150 },
               { title: '到达投放点', dataIndex: 'to', key: 'to' },
-              { title: '里程(km)', dataIndex: 'distanceKm', key: 'km', width: 100 },
-              { title: '耗时(h)', dataIndex: 'durationH', key: 'hour', width: 90 },
-              { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 100 },
-              { title: '出发时刻', dataIndex: 'departAt', key: 'depart' },
-              { title: '途中风险', dataIndex: 'riskNote', key: 'risk' }
+              { title: '到达坐标', dataIndex: 'toCoord', key: 'toCoord', width: 150 },
+              { title: '里程(km)', dataIndex: 'distanceKm', key: 'km', width: 90 },
+              { title: '耗时(h)', dataIndex: 'durationH', key: 'hour', width: 80 },
+              { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 90 },
+              { title: '首段时刻', dataIndex: 'departAt', key: 'depart', width: 150 },
+              { title: '途中风险', dataIndex: 'riskNote', key: 'risk' },
+              { title: '实际记录', dataIndex: 'actualNote', key: 'actual', width: 110 }
             ]}
           />
         </Card>

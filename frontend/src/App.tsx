@@ -21,9 +21,9 @@ export default function AppLayout(): JSX.Element {
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
-  const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const activePlan = usePersistentStore(routeStore, (state) => state.activePlan)
 
-  const totalKm = Math.round(routes.reduce((sum, item) => sum + item.distanceKm, 0) * 100) / 100
+  const totalKm = activePlan?.totalDistanceKm ?? 0
 
   return (
     <Layout className="app-shell">

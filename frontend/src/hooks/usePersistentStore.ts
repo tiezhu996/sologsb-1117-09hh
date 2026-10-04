@@ -1,26 +1,45 @@
 import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
-import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import type { BeeColony, DropPoint, Orchard, RoutePlan, RouteWaypoint, TransitRoute } from '@/types'
+import { computeFingerprint, PENDING_ACTUAL } from '@/utils/routePlan'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线 四张表 + 元数据表 */
-class BeeRouteDb extends Dexie {
+/** v3 升级前的旧版路线段结构（无版本/冻结字段） */
+interface LegacyTransitRoute {
+  id: string
+  fromDropId: string
+  toDropId: string
+  distanceKm: number
+  durationH: number
+  vehicleType: TransitRoute['vehicleType']
+  departAt: string
+  riskNote: string
+  actualNote: string
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+/** Dexie 封装：果园 / 蜂群 / 投放点 / 转场路线段 / 路线版本 五张表 + 元数据表 */
+export class BeeRouteDb extends Dexie {
   orchards!: Table<Orchard, string>
   colonies!: Table<BeeColony, string>
   dropPoints!: Table<DropPoint, string>
   routes!: Table<TransitRoute, string>
+  routePlans!: Table<RoutePlan, string>
   meta!: Table<MetaRow, string>
 
-  constructor() {
-    super('gbbeeroute')
+  constructor(name = 'gbbeeroute') {
+    super(name)
     this.version(1).stores({
       orchards: 'id, name, crop',
       colonies: 'id, code, status',
@@ -29,7 +48,7 @@ class BeeRouteDb extends Dexie {
       meta: 'key'
     })
     // v2：投放点新增「可容纳箱数」字段，迁移时为历史投放点补齐（按 8 箱兜底）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         orchards: 'id, name, crop, bloomStart',
         colonies: 'id, code, status, currentOrchardId',
@@ -46,6 +65,94 @@ class BeeRouteDb extends Dexie {
               point.capacityBoxes = 8
             }
           })
+      })
+    // v3：路线版本化发布。旧路线段按「车型 + 出发日期」聚合，补成已发布首版（冻结坐标/顺序/时刻/里程）
+    this.version(SCHEMA_VERSION)
+      .stores({
+        orchards: 'id, name, crop, bloomStart',
+        colonies: 'id, code, status, currentOrchardId',
+        dropPoints: 'id, orchardId, code, dropWindow',
+        routes: 'id, routeId, version, seq, fromDropId, toDropId, departAt',
+        routePlans: 'id, routeId, version, status, departAt',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        const pointList = await tx.table<DropPoint, string>('dropPoints').toArray()
+        const pointLookup = new Map(pointList.map((item) => [item.id, item]))
+        const routesTable = tx.table<TransitRoute, string>('routes')
+        const legacy = (await routesTable.toArray()) as unknown as LegacyTransitRoute[]
+
+        const groups = new Map<string, LegacyTransitRoute[]>()
+        legacy.forEach((leg) => {
+          const key = `${leg.vehicleType}|${(leg.departAt || '').slice(0, 10)}`
+          const list = groups.get(key) ?? []
+          list.push(leg)
+          groups.set(key, list)
+        })
+
+        const plans: RoutePlan[] = []
+        const migratedLegs: TransitRoute[] = []
+        let groupIndex = 0
+        groups.forEach((list) => {
+          list.sort((a, b) => a.departAt.localeCompare(b.departAt) || a.id.localeCompare(b.id))
+          const routeId = `rt_legacy_${groupIndex + 1}`
+          const waypoints: RouteWaypoint[] = []
+          const legs: TransitRoute[] = []
+          list.forEach((leg, seq) => {
+            const from = pointLookup.get(leg.fromDropId)
+            const to = pointLookup.get(leg.toDropId)
+            if (seq === 0 && from) {
+              waypoints.push({ dropId: from.id, seq: 0, code: from.code, longitude: from.longitude, latitude: from.latitude })
+            }
+            if (!to) return
+            if (!waypoints.some((item) => item.dropId === to.id)) {
+              waypoints.push({ dropId: to.id, seq: waypoints.length, code: to.code, longitude: to.longitude, latitude: to.latitude })
+            }
+            legs.push({
+              id: leg.id,
+              routeId,
+              version: 1,
+              seq,
+              fromDropId: leg.fromDropId,
+              toDropId: leg.toDropId,
+              fromLng: from?.longitude ?? 0,
+              fromLat: from?.latitude ?? 0,
+              toLng: to.longitude,
+              toLat: to.latitude,
+              distanceKm: leg.distanceKm,
+              durationH: leg.durationH,
+              vehicleType: leg.vehicleType,
+              departAt: leg.departAt,
+              riskNote: leg.riskNote ?? '',
+              actualNote: leg.actualNote || PENDING_ACTUAL
+            })
+          })
+          if (legs.length === 0) return
+          const departAt = legs[0].departAt
+          const totalDistanceKm = round2(legs.reduce((sum, leg) => sum + leg.distanceKm, 0))
+          plans.push({
+            id: `${routeId}__v1`,
+            routeId,
+            version: 1,
+            status: 'published',
+            waypoints,
+            legs,
+            vehicleType: legs[0].vehicleType,
+            departAt,
+            riskNote: legs[0].riskNote ?? '',
+            totalDistanceKm,
+            publishedAt: new Date().toISOString(),
+            supersededReason: '',
+            fingerprint: computeFingerprint({ waypoints, departAt, vehicleType: legs[0].vehicleType, totalDistanceKm })
+          })
+          migratedLegs.push(...legs)
+          groupIndex += 1
+        })
+
+        if (migratedLegs.length > 0) {
+          await routesTable.bulkPut(migratedLegs)
+          await tx.table<RoutePlan, string>('routePlans').bulkPut(plans)
+        }
       })
   }
 }
@@ -221,17 +328,45 @@ export async function seedDemoData(): Promise<void> {
     }
   ])
 
-  await db.routes.bulkPut([
-    {
-      id: 'rt_001',
-      fromDropId: 'dp_b01',
-      toDropId: 'dp_c01',
-      distanceKm: 9.4,
-      durationH: 0.54,
-      vehicleType: '农用三轮',
-      departAt: `${year}-04-13T06:30`,
-      riskNote: '西沟坡道窄，雨天泥泞，需小车倒运',
-      actualNote: '待执行'
-    }
-  ])
+  // 示例路线直接以「已发布 v1」写入：途经点顺序、坐标、首段时刻与里程全部冻结
+  const routeId = 'rt_main'
+  const departAt = `${year}-04-13T06:30`
+  const demoWaypoints: RouteWaypoint[] = [
+    { dropId: 'dp_b01', seq: 0, code: 'B-01', longitude: 107.4598, latitude: 34.6411 },
+    { dropId: 'dp_c01', seq: 1, code: 'C-01', longitude: 107.3741, latitude: 34.5902 }
+  ]
+  const demoLeg: TransitRoute = {
+    id: 'rt_001',
+    routeId,
+    version: 1,
+    seq: 0,
+    fromDropId: 'dp_b01',
+    toDropId: 'dp_c01',
+    fromLng: 107.4598,
+    fromLat: 34.6411,
+    toLng: 107.3741,
+    toLat: 34.5902,
+    distanceKm: 9.4,
+    durationH: 0.54,
+    vehicleType: '农用三轮',
+    departAt,
+    riskNote: '西沟坡道窄，雨天泥泞，需小车倒运',
+    actualNote: PENDING_ACTUAL
+  }
+  await db.routes.put(demoLeg)
+  await db.routePlans.put({
+    id: `${routeId}__v1`,
+    routeId,
+    version: 1,
+    status: 'published',
+    waypoints: demoWaypoints,
+    legs: [demoLeg],
+    vehicleType: '农用三轮',
+    departAt,
+    riskNote: demoLeg.riskNote,
+    totalDistanceKm: 9.4,
+    publishedAt: new Date().toISOString(),
+    supersededReason: '',
+    fingerprint: computeFingerprint({ waypoints: demoWaypoints, departAt, vehicleType: '农用三轮', totalDistanceKm: 9.4 })
+  })
 }

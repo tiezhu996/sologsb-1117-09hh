@@ -43,7 +43,7 @@ export default function SchedulePage(): JSX.Element {
   const orchards = usePersistentStore(orchardStore, (state) => state.rows)
   const colonies = usePersistentStore(colonyStore, (state) => state.rows)
   const dropPoints = usePersistentStore(droppointStore, (state) => state.rows)
-  const routes = usePersistentStore(routeStore, (state) => state.rows)
+  const routes = usePersistentStore(routeStore, (state) => state.activeLegs)
   const [scope, setScope] = useState<'all' | 'conflict'>('all')
 
   /** 由投放点的群号安排 + 蜂群当前所在地块，汇总出「某群在某地块」的时间占用 */
